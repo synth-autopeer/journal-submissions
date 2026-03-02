@@ -1,0 +1,127 @@
+name: Process Paper Submission
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  process-submission:
+    # Only run for issues created via the submission form (identified by the 'submission' label)
+    if: contains(github.event.issue.labels.*.name, 'submission')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Extract Repository URL from issue body
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || '';
+            // Issue form bodies use "### <Label>" as section headers
+            const match = body.match(/###\s+Repository URL\s*[\r\n]+(https?:\/\/[^\s]+)/);
+            if (!match) {
+              core.setFailed('Could not find a valid Repository URL in the issue body.');
+              return;
+            }
+            const repoUrl = match[1].trim();
+            core.info(`Repository URL: ${repoUrl}`);
+            core.setOutput('repo_url', repoUrl);
+
+      - name: Fork repository and rename it
+        id: fork
+        env:
+          # A Personal Access Token with 'repo' scope stored as GH_TOKEN secret
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REPO_URL: ${{ steps.extract.outputs.repo_url }}
+          ORG: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          # Normalise the URL: strip any trailing slash or .git suffix
+          REPO_URL="${REPO_URL%/}"
+          REPO_URL="${REPO_URL%.git}"
+
+          YEAR=$(date +%Y)
+
+          # Find the highest existing paper-YEAR-NNN repo number in the org.
+          # NOTE: concurrent submissions can theoretically race here; for a low-volume
+          # journal this is acceptable. A distributed lock would be needed at scale.
+          LAST_NUM=$(gh api "orgs/$ORG/repos" \
+            --paginate \
+            --jq '.[].name' \
+            2>/dev/null \
+            | grep -E "^paper-${YEAR}-[0-9]{3}$" \
+            | grep -oE '[0-9]{3}$' \
+            | sort -n \
+            | tail -1 || echo "000")
+
+          ID=$(printf "%03d" $(( 10#${LAST_NUM:-000} + 1 )))
+          NEW_NAME="paper-${YEAR}-${ID}"
+
+          # Fork the repository into the organisation
+          if ! gh repo fork "$REPO_URL" --org "$ORG" --clone=false; then
+            echo "fork_error=true" >> "$GITHUB_OUTPUT"
+            echo "error_msg=Failed to fork \`$REPO_URL\`. Please check that the repository exists, is accessible, and has not already been forked into this organisation." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # Derive the default fork name (the source repo's basename)
+          FORKED_REPO=$(basename "$REPO_URL")
+
+          # Rename the fork to the canonical paper identifier
+          if ! gh api --method PATCH "repos/$ORG/$FORKED_REPO" -f name="$NEW_NAME"; then
+            echo "fork_error=true" >> "$GITHUB_OUTPUT"
+            echo "error_msg=The repository was forked as \`$FORKED_REPO\` but could not be renamed to \`$NEW_NAME\`. The name may already be taken." >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "new_name=$NEW_NAME" >> "$GITHUB_OUTPUT"
+          echo "forked_url=https://github.com/$ORG/$NEW_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on issue and close it
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const forkedUrl = '${{ steps.fork.outputs.forked_url }}';
+            const newName   = '${{ steps.fork.outputs.new_name }}';
+
+            await github.rest.issues.createComment({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                `Thank you for your submission! 🎉`,
+                ``,
+                `Your paper repository has been forked into the organisation as **${newName}**:`,
+                `${forkedUrl}`,
+                ``,
+                `The AI review process will begin shortly inside that repository.`,
+              ].join('\n'),
+            });
+
+            await github.rest.issues.update({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.issue.number,
+              state:        'closed',
+            });
+
+      - name: Notify submitter of failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const errorMsg = `${{ steps.fork.outputs.error_msg }}`;
+            const body = errorMsg
+              ? `⚠️ **Submission processing failed.**\n\n${errorMsg}\n\nPlease correct the issue and open a new submission.`
+              : `⚠️ **Submission processing failed** due to an unexpected error. Please contact a maintainer for assistance.`;
+
+            await github.rest.issues.createComment({
+              owner:        context.repo.owner,
+              repo:         context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
