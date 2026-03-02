@@ -1,5 +1,8 @@
 # journal-submissions
 
+## System Architecture
+
+Here is the automated workflow for our AI publishing pipeline:
 
 ```mermaid
 graph TD
