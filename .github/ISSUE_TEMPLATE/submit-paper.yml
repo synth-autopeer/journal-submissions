@@ -1,0 +1,22 @@
+name: Submit Paper
+description: Submit a paper for peer review by providing its title and repository URL.
+title: "[SUBMISSION] "
+labels:
+  - submission
+body:
+  - type: input
+    id: paper-title
+    attributes:
+      label: Paper Title
+      description: The full title of the paper being submitted.
+      placeholder: e.g. Attention Is All You Need
+    validations:
+      required: true
+  - type: input
+    id: repository-url
+    attributes:
+      label: Repository URL
+      description: The URL of the GitHub repository containing the paper source.
+      placeholder: https://github.com/username/repo
+    validations:
+      required: true
